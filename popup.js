@@ -18,6 +18,23 @@ let currentVideo = null;
 let discoveredLessons = [];
 let pollTimer = null;
 
+function renderInitialLessons(lessons) {
+  bulkList.innerHTML = lessons.map((l, i) =>
+    `<li style="padding:2px 0;display:flex;align-items:center;gap:6px">` +
+    `<input type="checkbox" data-index="${i}" checked style="cursor:pointer">` +
+    `<span style="color:#555">${l.title || l.url}</span></li>`
+  ).join('');
+  updateStartButton();
+}
+
+function updateStartButton() {
+  const boxes = [...bulkList.querySelectorAll('input[type="checkbox"]')];
+  if (!boxes.length) return;
+  const n = boxes.filter(b => b.checked).length;
+  bulkStartBtn.textContent = n === boxes.length ? 'Download All' : `Download Selected (${n})`;
+  bulkStartBtn.disabled = n === 0;
+}
+
 function showError(msg) {
   resultEl.textContent = msg;
   resultEl.className = 'error';
@@ -94,11 +111,8 @@ async function init() {
       bulkInfoEl.style.display = 'block';
       bulkCourseLabel.textContent = `${discoveredLessons.length} lessons found on this page`;
 
-      // Pre-populate lesson list so "Show lessons" works before download starts
-      updateBulkProgress({
-        queue: discoveredLessons.map(l => ({ ...l, status: 'pending' })),
-        state: { active: false, total: discoveredLessons.length, completed: 0, failed: 0 },
-      });
+      // Pre-populate lesson list with checkboxes before download starts
+      renderInitialLessons(discoveredLessons);
 
       const existing = await sendMsg({ type: 'GET_BULK_STATUS' });
       if (existing?.state?.active) {
@@ -169,11 +183,14 @@ downloadBtn.addEventListener('click', async () => {
 
 bulkStartBtn.addEventListener('click', async () => {
   if (!discoveredLessons.length) return;
+  const boxes = [...bulkList.querySelectorAll('input[type="checkbox"]')];
+  const selected = discoveredLessons.filter((_, i) => boxes[i]?.checked);
+  if (!selected.length) return;
   bulkStartBtn.style.display = 'none';
   bulkCancelBtn.style.display = 'block';
   bulkResultEl.textContent = '';
   const preferredHeight = parseInt(document.getElementById('bulk-quality-select').value, 10);
-  await sendMsg({ type: 'START_BULK_DOWNLOAD', lessons: discoveredLessons, preferredHeight });
+  await sendMsg({ type: 'START_BULK_DOWNLOAD', lessons: selected, preferredHeight });
   startPolling();
 });
 
@@ -185,6 +202,22 @@ bulkCancelBtn.addEventListener('click', async () => {
   bulkResultEl.style.color = '#555';
   clearInterval(pollTimer);
   pollTimer = null;
+});
+
+document.getElementById('bulk-select-toggle').addEventListener('click', (e) => {
+  e.preventDefault();
+  const boxes = [...bulkList.querySelectorAll('input[type="checkbox"]')];
+  const anyChecked = boxes.some(b => b.checked);
+  boxes.forEach(b => { b.checked = !anyChecked; });
+  e.target.textContent = anyChecked ? 'Select all' : 'Deselect all';
+  updateStartButton();
+});
+
+bulkList.addEventListener('change', () => {
+  const boxes = [...bulkList.querySelectorAll('input[type="checkbox"]')];
+  const toggle = document.getElementById('bulk-select-toggle');
+  toggle.textContent = boxes.every(b => b.checked) ? 'Deselect all' : 'Select all';
+  updateStartButton();
 });
 
 init();
