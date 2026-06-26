@@ -86,6 +86,111 @@ function sanitizeFilename(title) {
   return title.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
 }
 
+// Core download dispatcher — shared by single-video and bulk-queue paths.
+async function downloadVideoToTab(video, tabId) {
+  const base = sanitizeFilename(video.title) || ('kajabi-video-' + video.id);
+
+  if (video.platform === 'wistia') {
+    const assets = await getWistiaAssets(video.id);
+    const asset = assets[0];
+    if (!asset) throw new Error('No downloadable asset found');
+    await chrome.downloads.download({ url: asset.url, filename: base + '.' + asset.ext, saveAs: false });
+    return { ok: true };
+  }
+
+  if (video.platform === 'hls') {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: hlsDownloadInPage,
+      args: [{ hlsUrl: video.hlsUrl, downloadUrl: video.downloadUrl, filename: base }],
+    });
+    const r = results?.[0];
+    if (r?.error) return { ok: false, error: r.error.message || 'Script injection error' };
+    return r?.result ?? { ok: false, error: 'Unknown HLS error' };
+  }
+
+  return { ok: false, error: 'Unknown platform: ' + video.platform };
+}
+
+// --- Bulk download queue ---
+
+const BULK_KEY = 'bulkQueue';
+const BULK_STATE_KEY = 'bulkState';
+
+async function getBulkState() {
+  const data = await chrome.storage.local.get([BULK_KEY, BULK_STATE_KEY]);
+  return { queue: data[BULK_KEY] ?? [], state: data[BULK_STATE_KEY] ?? null };
+}
+
+async function setBulkState(state) {
+  await chrome.storage.local.set({ [BULK_STATE_KEY]: state });
+}
+
+async function setQueue(queue) {
+  await chrome.storage.local.set({ [BULK_KEY]: queue });
+}
+
+// ponytail: sequential only (maxConcurrentTabs=1) — parallel tabs cause missed VIDEO_DETECTED signals
+async function runBulkQueue() {
+  const { queue } = await getBulkState();
+  const total = queue.length;
+  let completed = 0;
+  let failed = 0;
+
+  for (const lesson of queue) {
+    const { state } = await getBulkState();
+    if (state?.cancelled) {
+      await setBulkState({ active: false, cancelled: false, completed, failed, total });
+      return;
+    }
+
+    lesson.status = 'downloading';
+    await setQueue(queue);
+    await setBulkState({ active: true, current: lesson.url, completed, failed, total });
+
+    let tab = null;
+    try {
+      tab = await chrome.tabs.create({ url: lesson.url, active: false });
+
+      const video = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Timeout: no video detected')), 30000);
+        const listener = (msg) => {
+          if (msg.type === 'VIDEO_DETECTED' && msg.video) {
+            clearTimeout(timeout);
+            chrome.runtime.onMessage.removeListener(listener);
+            resolve(msg.video);
+          }
+        };
+        chrome.runtime.onMessage.addListener(listener);
+      });
+
+      const result = await downloadVideoToTab(video, tab.id);
+
+      if (result.ok) {
+        lesson.status = 'done';
+        completed++;
+        // ponytail: HLS close-tab delay 3s — Blob assembled but browser write may still be in progress
+        if (video.platform === 'hls') await new Promise(r => setTimeout(r, 3000));
+      } else {
+        lesson.status = 'failed';
+        lesson.error = result.error;
+        failed++;
+      }
+    } catch (err) {
+      lesson.status = 'failed';
+      lesson.error = err.message;
+      failed++;
+    } finally {
+      if (tab?.id) chrome.tabs.remove(tab.id).catch(() => {});
+    }
+
+    await setQueue(queue);
+  }
+
+  await setBulkState({ active: false, completed, failed, total });
+}
+
 // Self-contained function injected into the page's MAIN world for HLS download.
 // Must NOT reference anything defined outside its own body — all helpers live inside it.
 // Data is passed in via the args array; it only uses standard web APIs (fetch, URL,
@@ -293,56 +398,50 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'DOWNLOAD') {
     const { video, qualityIndex = 0 } = msg;
-
-    if (video.platform === 'wistia') {
-      // Phase 1: Wistia — existing behavior unchanged
-      getWistiaAssets(video.id)
-        .then(assets => {
+    (async () => {
+      try {
+        // Quality selection only applies to Wistia — use dedicated path to preserve saveAs: true
+        if (video.platform === 'wistia') {
+          const base = sanitizeFilename(video.title) || ('kajabi-video-' + video.id);
+          const assets = await getWistiaAssets(video.id);
           const asset = assets[qualityIndex] ?? assets[0];
           if (!asset) throw new Error('No downloadable asset found');
-
-          const base = sanitizeFilename(video.title) || ('kajabi-video-' + video.id);
-          return chrome.downloads.download({
-            url: asset.url,
-            filename: base + '.' + asset.ext,
-            saveAs: true,
-          });
-        })
-        .then(() => sendResponse({ ok: true }))
-        .catch(err => sendResponse({ ok: false, error: err.message }));
-      return true;
-    }
-
-    if (video.platform === 'hls') {
-      // Phase 2: Kajabi native HLS — assemble in page MAIN world, trigger <a download>
-      // No chrome.downloads needed; the page fetches its own segments (CORS works first-party).
-      const base = sanitizeFilename(video.title) || ('kajabi-video-' + video.id);
-      (async () => {
-        try {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (!tab?.id) { sendResponse({ ok: false, error: 'No active tab' }); return; }
-
-          const results = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            world: 'MAIN',
-            func: hlsDownloadInPage,
-            args: [{ hlsUrl: video.hlsUrl, downloadUrl: video.downloadUrl, filename: base }],
-          });
-
-          const r = results?.[0];
-          if (r?.error) {
-            sendResponse({ ok: false, error: r.error.message || 'Script injection error' });
-            return;
-          }
-          const res = r?.result ?? {};
-          sendResponse(res.ok
-            ? { ok: true, segmentCount: res.segmentCount }
-            : { ok: false, error: res.error || 'Unknown HLS download error' });
-        } catch (err) {
-          sendResponse({ ok: false, error: err.message });
+          await chrome.downloads.download({ url: asset.url, filename: base + '.' + asset.ext, saveAs: true });
+          sendResponse({ ok: true });
+          return;
         }
-      })();
-      return true;
-    }
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) { sendResponse({ ok: false, error: 'No active tab' }); return; }
+        const result = await downloadVideoToTab(video, tab.id);
+        sendResponse(result);
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'START_BULK_DOWNLOAD') {
+    const queue = msg.lessons.map(l => ({ ...l, status: 'pending' }));
+    setQueue(queue).then(() =>
+      setBulkState({ active: true, completed: 0, failed: 0, total: queue.length, current: null })
+    ).then(() => {
+      sendResponse({ ok: true });
+      runBulkQueue();
+    });
+    return true;
+  }
+
+  if (msg.type === 'GET_BULK_STATUS') {
+    getBulkState().then(data => sendResponse(data));
+    return true;
+  }
+
+  if (msg.type === 'CANCEL_BULK_DOWNLOAD') {
+    getBulkState().then(async ({ state }) => {
+      await setBulkState({ ...(state ?? {}), cancelled: true });
+      sendResponse({ ok: true });
+    });
+    return true;
   }
 });

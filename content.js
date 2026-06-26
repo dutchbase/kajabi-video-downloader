@@ -190,4 +190,26 @@
     debounceTimer = setTimeout(runDetection, 600);
   });
   observer.observe(document.body, { childList: true, subtree: true });
+
+  // Scan all anchor tags for Kajabi lesson links.
+  // Uses href pattern instead of CSS classes — stable across Kajabi UI changes.
+  function extractLessonUrls() {
+    const seen = new Set();
+    return [...document.querySelectorAll('a[href*="/lessons/"]')]
+      .map(a => ({
+        url: new URL(a.href, location.href).href,
+        title: a.textContent.trim() || a.href.split('/').pop(),
+      }))
+      .filter(({ url }) => {
+        if (seen.has(url)) return false;
+        seen.add(url);
+        return true;
+      });
+  }
+
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg.type === 'EXTRACT_LESSON_URLS') {
+      sendResponse({ lessons: extractLessonUrls() });
+    }
+  });
 })();
