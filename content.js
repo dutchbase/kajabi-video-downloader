@@ -195,7 +195,7 @@
   // Uses href pattern instead of CSS classes — stable across Kajabi UI changes.
   function extractLessonUrls() {
     const seen = new Set();
-    return [...document.querySelectorAll('a[href*="/lessons/"]')]
+    return [...document.querySelectorAll('a[href*="/lessons/"], a[href*="/posts/"]')]
       .map(a => ({
         url: new URL(a.href, location.href).href,
         title: a.textContent.trim() || a.href.split('/').pop(),
