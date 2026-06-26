@@ -5,7 +5,9 @@ Download videos from Kajabi courses you have access to — Wistia-hosted and nat
 ## Features
 
 - **One-click downloads** from Kajabi course pages
-- **Quality selection** for Wistia videos (original + multiple resolutions)
+- **Bulk course download** — open a course overview page to download all lessons at once
+- **Checkbox selection** — pick exactly which lessons to download before starting
+- **Quality selection** for Wistia videos (original + multiple resolutions) and bulk downloads
 - **HLS playlist support** with automatic decryption (AES-128)
 - **No external dependencies** — works offline, no build required
 - **Clean room code** — fresh implementation, no proprietary watermarks or telemetry
@@ -31,6 +33,17 @@ Download videos from Kajabi courses you have access to — Wistia-hosted and nat
 1. Navigate to a Kajabi lesson with HLS streaming
 2. The blue **⬇ Download** button appears automatically
 3. Click **Download** — the extension fetches the full HLS stream, assembles it, and saves as MP4
+
+### Bulk Course Download
+1. Navigate to a **course overview page** (the page that lists all lessons, not an individual lesson)
+2. Click the extension icon — it detects all lesson links and shows a lesson list
+3. **Check/uncheck** the lessons you want; click **Deselect all** or **Select all** to toggle
+4. *Optional:* choose a quality from the **Quality** dropdown (Best available, 1080p, 720p, 480p, 360p)
+5. Click **Download All** (or **Download Selected (N)** if you unchecked some)
+6. The extension opens each lesson in a background tab, detects the video, downloads it, then moves to the next — progress is shown in the popup
+7. Click **Cancel** at any time to stop mid-queue
+
+> **Tip:** Supported lesson URL patterns: `/posts/` and `/lessons/` (both are used by Kajabi).
 
 ## Limitations
 
