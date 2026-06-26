@@ -87,12 +87,15 @@ function sanitizeFilename(title) {
 }
 
 // Core download dispatcher — shared by single-video and bulk-queue paths.
-async function downloadVideoToTab(video, tabId) {
+// preferredHeight: -1 = best available; >0 = pick closest asset at or below that height.
+async function downloadVideoToTab(video, tabId, preferredHeight = -1) {
   const base = sanitizeFilename(video.title) || ('kajabi-video-' + video.id);
 
   if (video.platform === 'wistia') {
     const assets = await getWistiaAssets(video.id);
-    const asset = assets[0];
+    const asset = preferredHeight > 0
+      ? (assets.find(a => !a.isOriginal && a.height <= preferredHeight) ?? assets[assets.length - 1])
+      : assets[0];
     if (!asset) throw new Error('No downloadable asset found');
     await chrome.downloads.download({ url: asset.url, filename: base + '.' + asset.ext, saveAs: false });
     return { ok: true };
@@ -132,7 +135,7 @@ async function setQueue(queue) {
 }
 
 // ponytail: sequential only (maxConcurrentTabs=1) — parallel tabs cause missed VIDEO_DETECTED signals
-async function runBulkQueue() {
+async function runBulkQueue(preferredHeight = -1) {
   const { queue } = await getBulkState();
   const total = queue.length;
   let completed = 0;
@@ -165,7 +168,7 @@ async function runBulkQueue() {
         chrome.runtime.onMessage.addListener(listener);
       });
 
-      const result = await downloadVideoToTab(video, tab.id);
+      const result = await downloadVideoToTab(video, tab.id, preferredHeight);
 
       if (result.ok) {
         lesson.status = 'done';
@@ -422,12 +425,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'START_BULK_DOWNLOAD') {
-    const queue = msg.lessons.map(l => ({ ...l, status: 'pending' }));
+    const { lessons, preferredHeight = -1 } = msg;
+    const queue = lessons.map(l => ({ ...l, status: 'pending' }));
     setQueue(queue).then(() =>
       setBulkState({ active: true, completed: 0, failed: 0, total: queue.length, current: null })
     ).then(() => {
       sendResponse({ ok: true });
-      runBulkQueue();
+      runBulkQueue(preferredHeight);
     });
     return true;
   }

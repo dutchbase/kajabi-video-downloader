@@ -68,6 +68,50 @@ function startPolling() {
 }
 
 async function init() {
+  const [tab] = await new Promise(resolve =>
+    chrome.tabs.query({ active: true, currentWindow: true }, resolve)
+  );
+  if (!tab?.id) return;
+
+  // Only show bulk mode on course overview pages, not on lesson pages.
+  // Lesson pages also have sidebar nav links, which would falsely trigger bulk mode.
+  const isLessonPage = /\/(posts|lessons)\//.test(tab.url ?? '');
+
+  if (!isLessonPage) {
+    let lessonsResp = null;
+    try {
+      lessonsResp = await new Promise((resolve, reject) => {
+        chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT_LESSON_URLS' }, resp => {
+          if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+          else resolve(resp);
+        });
+      });
+    } catch (_) {}
+
+    if (lessonsResp?.lessons?.length > 1) {
+      discoveredLessons = lessonsResp.lessons;
+      statusEl.style.display = 'none';
+      bulkInfoEl.style.display = 'block';
+      bulkCourseLabel.textContent = `${discoveredLessons.length} lessons found on this page`;
+
+      // Pre-populate lesson list so "Show lessons" works before download starts
+      updateBulkProgress({
+        queue: discoveredLessons.map(l => ({ ...l, status: 'pending' })),
+        state: { active: false, total: discoveredLessons.length, completed: 0, failed: 0 },
+      });
+
+      const existing = await sendMsg({ type: 'GET_BULK_STATUS' });
+      if (existing?.state?.active) {
+        bulkStartBtn.style.display = 'none';
+        bulkCancelBtn.style.display = 'block';
+        updateBulkProgress(existing);
+        startPolling();
+      }
+      return;
+    }
+  }
+
+  // Single-video mode
   const { video } = await sendMsg({ type: 'GET_DETECTED' });
 
   if (!video) {
@@ -101,39 +145,6 @@ async function init() {
     opt.textContent = q.label;
     qualitySelect.appendChild(opt);
   }
-  // Default selects index 0 (best) — first option is already selected
-
-  // Check if there are multiple lesson links on this page → switch to bulk mode
-  const [tab] = await new Promise(resolve =>
-    chrome.tabs.query({ active: true, currentWindow: true }, resolve)
-  );
-  if (!tab?.id) return;
-
-  let lessonsResp = null;
-  try {
-    lessonsResp = await new Promise((resolve, reject) => {
-      chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT_LESSON_URLS' }, resp => {
-        if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-        else resolve(resp);
-      });
-    });
-  } catch (_) {}
-
-  if (lessonsResp?.lessons?.length > 1) {
-    discoveredLessons = lessonsResp.lessons;
-    videoInfoEl.style.display = 'none';
-    statusEl.style.display = 'none';
-    bulkInfoEl.style.display = 'block';
-    bulkCourseLabel.textContent = `${discoveredLessons.length} lessons found on this page`;
-
-    const existing = await sendMsg({ type: 'GET_BULK_STATUS' });
-    if (existing?.state?.active) {
-      bulkStartBtn.style.display = 'none';
-      bulkCancelBtn.style.display = 'block';
-      updateBulkProgress(existing);
-      startPolling();
-    }
-  }
 }
 
 downloadBtn.addEventListener('click', async () => {
@@ -161,7 +172,8 @@ bulkStartBtn.addEventListener('click', async () => {
   bulkStartBtn.style.display = 'none';
   bulkCancelBtn.style.display = 'block';
   bulkResultEl.textContent = '';
-  await sendMsg({ type: 'START_BULK_DOWNLOAD', lessons: discoveredLessons });
+  const preferredHeight = parseInt(document.getElementById('bulk-quality-select').value, 10);
+  await sendMsg({ type: 'START_BULK_DOWNLOAD', lessons: discoveredLessons, preferredHeight });
   startPolling();
 });
 
